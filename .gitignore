@@ -1,0 +1,54 @@
+# Python
+__pycache__/
+*.pyc
+
+# Automation virtualenv + run logs (not source). The status file is tracked since 2026-10-26: the GitHub Actions
+# runner commits it with the dashboard so the laptop and the brief read the same run.
+scripts/automation/venv/
+automation-logs/*
+!automation-logs/pipeline-status.json
+
+# Generated dashboard outputs (rebuilt by scripts/job_dashboard.py). The Markdown is tracked since 2026-10-26 (the
+# GitHub Actions runner commits it each night); the HTML stays local because it embeds the decision token that
+# authenticates the Later and Applied buttons to the localhost helper. show-my-jobs renders it after a pull.
+job-dashboard.html
+# Daily side files: queue memory + curated-Apply liveness verdicts (regenerated every run)
+dashboard/queue-seen.json
+dashboard/apply-liveness.json
+
+# Volatile raw discovery sweeps + dedup ledger
+weekly-sweeps/
+
+# Volatile agent-generated data + personal docs (not source)
+parsed-jobs/
+weekly-reviews/
+company-research/
+resumes/
+
+# Local secret: the dashboard's decision buttons authenticate to the localhost helper with it
+dashboard/.decision-token
+# Regenerated lookup cache (employer headquarters)
+dashboard/employer-hq.json
+# Provider rate-control state (cooldowns, budgets) and its lock / temp / corrupt-file residue
+dashboard/provider-state.json
+dashboard/provider-state.json.*
+# Personal notes and editor workspaces
+.obsidian/
+notes/
+# interview prep notes (personal)
+interview-prep/
+# gold labelling forms carry posting text and recruiter addresses; the labels live in dashboard/gold-labels.json
+reports/gold-form-*.html
+/*.pdf
+/*.html
+
+# The judge: verdicts, gold set, disagreement log (Python-owned SQLite). The verdicts are rebuilt by the chain;
+# the gold table is NOT: it is exported to dashboard/gold-labels.json (tracked) by gold_import.py after every import.
+dashboard/verdicts.db
+dashboard/verdicts.db-journal
+
+# Secrets never belong here (belt and braces; keys live in Windows user env vars)
+.env
+.env.*
+*.pem
+credentials*

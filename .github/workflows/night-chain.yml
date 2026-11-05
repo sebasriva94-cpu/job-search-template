@@ -1,0 +1,228 @@
+# The night chain on a GitHub Actions Windows runner, so it does not depend on a laptop
+# being on.
+#
+# Two cron slots are candidates for 00:30 Eastern (04:30 UTC in summer time, 05:30 UTC in standard time);
+# the "slot" step keeps the ones whose local hour is 0 and lets the other end in a minute. A third slot
+# at 12:00 UTC is a catch-up: GitHub's cron can run hours late and the midnight-only gate would skip the night, so
+# any scheduled run outside the midnight hour now runs -Phase catchup, which exits in a second when the
+# night finished and otherwise makes the night up. A manual run ignores the slot. State lives on the orphan
+# `state` branch of this repo and is restored before the chain and saved after it; the outputs the owner reads
+# (dashboard Markdown, data file, status file) are committed on main. The HTML is rendered on the laptop.
+#
+# Secrets, entered by the owner in the repository settings (never by Claude): ANTHROPIC_API_KEY, USAJOBS_API_KEY,
+# JSEARCH_API_TOKEN, APIFY_TOKEN, BRIGHTDATA_API_TOKEN, BRIEF_REPO_TOKEN (fine-grained, contents read and write
+# on your-github-user/private-brief-repo). Variable: BRIGHTDATA_UNLOCKER_ZONE (defaults to web_unlocker).
+name: Night chain
+
+on:
+  # Schedule is off in the template: uncomment it in your own private copy once the secrets below are set.
+#  schedule:
+#    - cron: '30 4 * * *'
+#    - cron: '30 5 * * *'
+#    - cron: '0 12 * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'No paid calls (JOBSEARCH_TEST_NO_PAID_SWEEPS=1); state and outputs are not committed'
+        type: boolean
+        default: false
+      phase:
+        description: 'What to run'
+        type: choice
+        options: [full-and-trickle, full, trickle, late, catchup]
+        default: full-and-trickle
+
+concurrency:
+  group: night-chain
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  chain:
+    runs-on: windows-latest
+    timeout-minutes: 150
+    env:
+      JOBSEARCH_ROOT: ${{ github.workspace }}
+      STATE_DIR: ${{ github.workspace }}\..\state
+      BRIEF_REPO: ${{ github.workspace }}\..\private-brief-repo
+      PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}\..\pw-browsers
+    steps:
+      - name: Eastern time on the runner
+        shell: pwsh
+        run: tzutil /s "Eastern Standard Time"
+
+      - name: Is this the 00:30 slot
+        id: slot
+        shell: pwsh
+        run: |
+          $hour = (Get-Date).Hour
+          if ('${{ github.event_name }}' -eq 'workflow_dispatch') {
+            $run = $true; $phase = '${{ inputs.phase || 'full-and-trickle' }}'
+          } elseif ($hour -eq 0) {
+            $run = $true; $phase = 'full-and-trickle'
+          } else {
+            # the 12:00 UTC catch-up slot: outside the midnight hour a scheduled run only catches up
+            # (pull-jobs.lib.ps1 Resolve-Phase: exit when tonight ran, else a late pass or the full chain)
+            $run = $true; $phase = 'catchup'
+          }
+          "run=$($run.ToString().ToLower())" >> $env:GITHUB_OUTPUT
+          "phase=$phase" >> $env:GITHUB_OUTPUT
+          "local time $(Get-Date -Format 'yyyy-MM-dd HH:mm zzz'), run=$run, phase=$phase"
+
+      - name: Check out main
+        if: steps.slot.outputs.run == 'true'
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Check out the state branch (or start one)
+        if: steps.slot.outputs.run == 'true'
+        shell: pwsh
+        run: |
+          $url = "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git"
+          git clone --quiet --branch state --single-branch --depth 1 $url "$env:STATE_DIR"
+          if ($LASTEXITCODE -ne 0) {
+            "no state branch yet: starting an empty one"
+            if (Test-Path "$env:STATE_DIR") { Remove-Item -Recurse -Force "$env:STATE_DIR" }
+            git clone --quiet --depth 1 $url "$env:STATE_DIR"
+            git -C "$env:STATE_DIR" checkout --quiet --orphan state
+            git -C "$env:STATE_DIR" rm -rfq --ignore-unmatch . 2>$null
+          }
+          # a pwsh step ends with the last native command's exit code, so report and end cleanly
+          $head = git -C "$env:STATE_DIR" rev-parse --verify --quiet HEAD 2>$null
+          if ($head) { git -C "$env:STATE_DIR" log --oneline -1 } else { "state branch is empty (first run)" }
+          exit 0
+
+      - name: Python
+        if: steps.slot.outputs.run == 'true'
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.14'
+          cache: pip
+          cache-dependency-path: scripts/automation/requirements.txt
+
+      - name: Python packages
+        if: steps.slot.outputs.run == 'true'
+        shell: pwsh
+        run: |
+          python -m pip install --quiet --upgrade pip
+          python -m pip install --quiet -r scripts/automation/requirements.txt
+          "JOBSEARCH_PYTHON=$((Get-Command python).Source)" >> $env:GITHUB_ENV
+
+      - name: Playwright browser cache
+        if: steps.slot.outputs.run == 'true'
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}\..\pw-browsers
+          key: playwright-${{ runner.os }}-${{ hashFiles('scripts/automation/requirements.txt') }}
+
+      - name: Playwright browser (HubSpot sweep)
+        if: steps.slot.outputs.run == 'true'
+        shell: pwsh
+        run: python -m playwright install chromium
+
+      - name: Node and the Bright Data CLI (employer lookups)
+        if: steps.slot.outputs.run == 'true'
+        uses: actions/setup-node@v5
+        with:
+          node-version: '20'
+
+      - name: Bright Data CLI
+        if: steps.slot.outputs.run == 'true'
+        shell: pwsh
+        run: |
+          npm install --global --silent @brightdata/cli
+          "BDATA_NODE=$((Get-Command node).Source)" >> $env:GITHUB_ENV
+          "BDATA_CLI_JS=$(npm root -g)\@brightdata\cli\dist\index.js" >> $env:GITHUB_ENV
+
+      - name: Restore state
+        if: steps.slot.outputs.run == 'true'
+        shell: pwsh
+        run: python scripts/automation/state_sync.py restore "$env:STATE_DIR" --root "$env:JOBSEARCH_ROOT"
+
+      - name: Clone the brief's repo
+        if: steps.slot.outputs.run == 'true' && inputs.dry_run != true
+        shell: pwsh
+        run: |
+          git config --global user.name "night-chain"
+          git config --global user.email "night-chain@users.noreply.github.com"
+          git clone --quiet "https://x-access-token:${{ secrets.BRIEF_REPO_TOKEN }}@github.com/your-github-user/your-private-brief-repo.git" "$env:BRIEF_REPO"
+
+      - name: Run the chain
+        if: steps.slot.outputs.run == 'true'
+        shell: pwsh
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          USAJOBS_API_KEY: ${{ secrets.USAJOBS_API_KEY }}
+          Jsearch_API_TOKEN: ${{ secrets.JSEARCH_API_TOKEN }}
+          APIFY_TOKEN: ${{ secrets.APIFY_TOKEN }}
+          BRIGHTDATA_API_TOKEN: ${{ secrets.BRIGHTDATA_API_TOKEN }}
+          BRIGHTDATA_API_KEY: ${{ secrets.BRIGHTDATA_API_TOKEN }}
+          BRIGHTDATA_UNLOCKER_ZONE: ${{ vars.BRIGHTDATA_UNLOCKER_ZONE || 'web_unlocker' }}
+          JOBSEARCH_TEST_NO_PAID_SWEEPS: ${{ inputs.dry_run == true && '1' || '' }}
+        run: |
+          $phases = switch ('${{ steps.slot.outputs.phase }}') {
+            'full-and-trickle' { @('full', 'trickle') }
+            default { @('${{ steps.slot.outputs.phase }}') }
+          }
+          $ps = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
+          $failed = @()
+          foreach ($phase in $phases) {
+            "=== pull-jobs.ps1 -Phase $phase"
+            & $ps -NoProfile -ExecutionPolicy Bypass -File "$env:JOBSEARCH_ROOT\scripts\automation\pull-jobs.ps1" -Phase $phase
+            "=== exit $LASTEXITCODE"
+            if ($LASTEXITCODE -ne 0) { $failed += "$phase (exit $LASTEXITCODE)" }
+          }
+          $status = "$env:JOBSEARCH_ROOT\automation-logs\pipeline-status.json"
+          if (Test-Path $status) {
+            Get-Content $status -Raw | ConvertFrom-Json |
+              Select-Object run_date, finished, processed, @{n='alert';e={ $_.alert.headline }} | Format-List
+          }
+          # state and outputs are saved by the next steps whatever happened; the last step fails the run if a phase did
+          "failed=$($failed -join '; ')" >> $env:GITHUB_OUTPUT
+          exit 0
+        id: chain
+
+      - name: Save state
+        if: steps.slot.outputs.run == 'true' && inputs.dry_run != true
+        shell: pwsh
+        run: |
+          python scripts/automation/state_sync.py save "$env:STATE_DIR" --root "$env:JOBSEARCH_ROOT"
+          git -C "$env:STATE_DIR" add -A
+          git -C "$env:STATE_DIR" commit --quiet -m "State after the night run of $(Get-Date -Format 'yyyy-MM-dd')"
+          if ($LASTEXITCODE -ne 0) { "state unchanged, nothing to commit"; exit 0 }
+          git -C "$env:STATE_DIR" push --quiet origin HEAD:state
+          exit $LASTEXITCODE
+
+      - name: Commit the outputs on main
+        if: steps.slot.outputs.run == 'true' && inputs.dry_run != true
+        shell: pwsh
+        run: |
+          # not job-dashboard.html: it embeds the laptop's local decision token and is rendered there after a pull
+          git add job-dashboard.md dashboard/job-dashboard-data.json automation-logs/pipeline-status.json
+          git commit --quiet -m "Night run $(Get-Date -Format 'yyyy-MM-dd')" 2>$null
+          if ($LASTEXITCODE -ne 0) { "nothing to commit"; exit 0 }
+          git pull --rebase --quiet origin main
+          git push --quiet origin HEAD:main
+
+      - name: Keep the logs
+        if: always() && steps.slot.outputs.run == 'true'
+        uses: actions/upload-artifact@v5
+        with:
+          name: automation-logs-${{ github.run_id }}
+          path: |
+            automation-logs/*.log
+            automation-logs/*.jsonl
+            automation-logs/pipeline-status.json
+          retention-days: 14
+          if-no-files-found: ignore
+
+      - name: Chain result
+        if: steps.slot.outputs.run == 'true'
+        shell: pwsh
+        run: |
+          $failed = '${{ steps.chain.outputs.failed }}'
+          if ($failed) { Write-Error "chain phase failed: $failed"; exit 1 }
+          "every phase exited 0"
