@@ -174,7 +174,7 @@ def normalize_company(value: object) -> str:
 
 def normalize_title(value: object) -> str:
     title = _text(value).lower()
-    title = re.sub(r"\s*\([^)]*(remote|united states|us|usa|austin|tx|\bnc\b|north carolina)[^)]*\)\s*$", "", title)
+    title = re.sub(r"\s*\([^)]*(remote|united states|us|usa|\bnc\b|north carolina)[^)]*\)\s*$", "", title)
     return re.sub(r"\s+", " ", title)
 
 

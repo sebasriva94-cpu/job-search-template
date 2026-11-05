@@ -66,7 +66,7 @@ class USAJobsMappingTests(unittest.TestCase):
         rows = usajobs_sweep.remote_rows([onsite_oklahoma, remote_us])
         self.assertEqual([row["location"] for row in rows], ["Remote, United States"])
 
-    def test_duty_station_searches_are_home_region_and_second_metro_not_austin(self):
+    def test_duty_station_searches_are_home_region_and_second_metro(self):
         asked = []
         with mock.patch.object(usajobs_sweep, "get_key", return_value="k"), \
                 mock.patch.object(usajobs_sweep, "search", side_effect=lambda key, **p: asked.append(p) or []), \

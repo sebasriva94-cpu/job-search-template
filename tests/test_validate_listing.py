@@ -117,7 +117,7 @@ class DecideTests(unittest.TestCase):
         self.assertIn("3 weeks or more", v["reasons"][0])
         self.assertEqual(vl.decide({}, self.facts(posted="2 weeks ago"))["verdict"], "apply_now")
 
-    def test_austin_onsite_is_now_outside_the_target_area(self):
+    def test_onsite_outside_the_target_areas_is_skipped(self):
         # Denver is outside the example target areas.
         v = vl.decide({"location": "Denver, CO"}, self.facts(location="Denver, CO", onsite=True))
         self.assertEqual(v["verdict"], "skip")
@@ -290,8 +290,8 @@ class UnreadablePageTests(unittest.TestCase):
         # Live check 2024-12-09: "Remote Support Engineer II" at "Remote, US" was called onsite elsewhere.
         remote = dict(self.ROW, title="Remote Support Engineer II", location="Remote, US")
         self.assertEqual(self.run_with(401, row=remote)["verdict"], "indeterminate")
-        austin = dict(self.ROW, location="Denver, CO")
-        self.assertEqual(self.run_with(401, row=austin)["verdict"], "skip")
+        elsewhere = dict(self.ROW, location="Denver, CO")
+        self.assertEqual(self.run_with(401, row=elsewhere)["verdict"], "skip")
 
 
 class LocationFromBodyTests(unittest.TestCase):
